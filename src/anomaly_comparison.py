@@ -1,0 +1,52 @@
+import numpy as np
+from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
+from sklearn.preprocessing import RobustScaler
+from sklearn.svm import OneClassSVM
+
+from src.forecast import DETECTOR_FEATURES
+
+
+def add_anomaly_detectors(scored, train_dates, seed=42):
+    """Add novelty scores and IQR-calibrated flags using historical bookings only."""
+    train_mask = scored['arrival'].isin(train_dates).to_numpy()
+    train_size = int(train_mask.sum())
+    if train_size < 2:
+        raise ValueError('At least two historical bookings are required')
+
+    features = scored[DETECTOR_FEATURES]
+    scaler = RobustScaler().fit(features.loc[train_mask])
+    scaled = scaler.transform(features)
+    training = scaled[train_mask]
+    holdout = scaled[~train_mask]
+    neighbors = min(20, train_size - 1)
+    flag_rate = scored.loc[train_mask, 'iqr'].mean()
+
+    knn = NearestNeighbors(n_neighbors=neighbors, algorithm='kd_tree').fit(training)
+    lof = LocalOutlierFactor(n_neighbors=neighbors, algorithm='kd_tree', novelty=True).fit(training)
+    knn_scores = np.empty(len(scored))
+    lof_scores = np.empty(len(scored))
+    knn_scores[train_mask] = knn.kneighbors()[0].mean(axis=1)
+    lof_scores[train_mask] = -lof.negative_outlier_factor_
+    if len(holdout):
+        knn_scores[~train_mask] = knn.kneighbors(holdout)[0].mean(axis=1)
+        lof_scores[~train_mask] = -lof.score_samples(holdout)
+
+    rng = np.random.default_rng(seed)
+    svm_indices = rng.choice(train_size, size=min(train_size, 8_000), replace=False)
+    svm = OneClassSVM(kernel='rbf', gamma='scale', nu=max(1 / train_size, flag_rate))
+    svm.fit(training[svm_indices])
+    scores = {'knn': knn_scores, 'lof': lof_scores, 'ocsvm': -svm.score_samples(scaled)}
+
+    # Map scores to percentiles of the training distribution before averaging.
+    ensemble_inputs = [scored['forest_score'].to_numpy(), *scores.values()]
+    scores['ensemble'] = np.mean([
+        np.searchsorted(np.sort(values[train_mask]), values, side='right') / train_size
+        for values in ensemble_inputs
+    ], axis=0)
+
+    additional_columns = {}
+    for name, values in scores.items():
+        threshold = np.quantile(values[train_mask], 1 - flag_rate)
+        additional_columns[f'{name}_score'] = values
+        additional_columns[name] = values > threshold
+    return scored.assign(**additional_columns)
