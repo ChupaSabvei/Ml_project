@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
+from sklearn.neighbors import KernelDensity, LocalOutlierFactor, NearestNeighbors
 from sklearn.preprocessing import RobustScaler
 from sklearn.svm import OneClassSVM
 
@@ -50,3 +50,29 @@ def add_anomaly_detectors(scored, train_dates, seed=42):
         additional_columns[f'{name}_score'] = values
         additional_columns[name] = values > threshold
     return scored.assign(**additional_columns)
+
+
+def add_combined_flags(scored, train_dates, limits, seed=42):
+    """Compare Boolean combinations with a joint statistical density estimate."""
+    train_mask = scored['arrival'].isin(train_dates)
+    features = scored[DETECTOR_FEATURES]
+    outside = features.lt(limits['Нижняя граница']) | features.gt(limits['Верхняя граница'])
+    votes = scored[['forest', 'knn', 'lof', 'ocsvm']].sum(axis=1)
+
+    scaler = RobustScaler().fit(features.loc[train_mask])
+    scaled = scaler.transform(features)
+    training = scaled[train_mask.to_numpy()]
+    rng = np.random.default_rng(seed)
+    reference = rng.choice(len(training), size=min(4_000, len(training)), replace=False)
+    kde = KernelDensity(bandwidth=0.25, rtol=1e-4).fit(training[reference])
+    kde_score = -kde.score_samples(scaled)
+    threshold = np.quantile(kde_score[train_mask], 1 - scored.loc[train_mask, 'iqr'].mean())
+
+    return scored.assign(
+        iqr_two=outside.sum(axis=1).ge(2),
+        iqr_or_forest=scored['iqr'] | scored['forest'],
+        iqr_and_forest=scored['iqr'] & scored['forest'],
+        ml_majority=votes.ge(3),
+        kde_score=kde_score,
+        kde=kde_score > threshold,
+    )
