@@ -56,6 +56,14 @@ def forecast_baseline(scored, train_dates, active_counts, excluded_flag=None):
     return rate, forecast, len(history) - len(sample)
 
 
+def forecast_by_flag(scored, train_dates, dates, flag):
+    """Keep the full cohort and estimate a historical show rate for each flag value."""
+    history = scored.loc[scored['arrival'].isin(train_dates)]
+    rates = history.groupby(flag)['show'].mean()
+    probabilities = scored[flag].map(rates).fillna(history['show'].mean())
+    return probabilities.groupby(scored['arrival']).sum().reindex(dates, fill_value=0.0)
+
+
 def detect_anomalies(active, train_dates, seed=42):
     """Fit the IQR limits and Isolation Forest threshold on historical bookings."""
     train_mask = active['arrival'].isin(train_dates)

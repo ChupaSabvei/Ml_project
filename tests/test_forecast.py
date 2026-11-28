@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from src.forecast import detect_anomalies, forecast_baseline, make_snapshot, temporal_split
+from src.forecast import detect_anomalies, forecast_baseline, forecast_by_flag, make_snapshot, temporal_split
 
 
 class SnapshotTests(unittest.TestCase):
@@ -95,6 +95,14 @@ class BaselineTests(unittest.TestCase):
                 self.assertEqual(rate, expected_rate)
                 self.assertEqual(excluded, 1)
                 pd.testing.assert_series_equal(forecast, self.active_counts * expected_rate)
+
+    def test_flag_rates_keep_flagged_bookings_and_handle_unseen_groups(self):
+        dates = self.active_counts.index
+        forecast = forecast_by_flag(self.scored, self.train_dates, dates, 'iqr')
+        self.assertEqual(forecast.tolist(), [2 / 3, 0])
+        unseen = self.scored.assign(forest=[False, False, False, False, True])
+        forecast = forecast_by_flag(unseen, self.train_dates, dates, 'forest')
+        self.assertEqual(forecast.tolist(), [0.75, 0])
 
 
 class AnomalyTests(unittest.TestCase):
